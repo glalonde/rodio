@@ -1,70 +1,25 @@
-//! Queue that plays sounds one after the other.
-
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::sync::mpsc;
-use std::sync::mpsc::Receiver;
-use std::sync::mpsc::Sender;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
-use source::stoppable;
 use source::Empty;
 use source::Source;
-use source::Stoppable;
 use source::Zero;
 
 use Sample;
 
-/// Builds a new queue. It consists of an input and an output.
-///
-/// The input can be used to add sounds to the end of the queue, while the output implements
-/// `Source` and plays the sounds.
-///
-/// The parameter indicates how the queue should behave if the queue becomes empty:
-///
-/// - If you pass `true`, then the queue is infinite and will play a silence instead until you add
-///   a new sound.
-/// - If you pass `false`, then the queue will report that it has finished playing.
-///
-pub fn queue<S>(keep_alive_if_empty: bool) -> (Arc<SourcesQueueInput<S>>, SourcesQueueOutput<S>)
-where
-    S: Sample + Send + 'static,
-{
-    let input = Arc::new(SourcesQueueInput {
-        next_sounds: Mutex::new(Vec::new()),
-        keep_alive_if_empty: AtomicBool::new(keep_alive_if_empty),
-        skip_sound: AtomicBool::new(false),
-    });
-
-    let output = SourcesQueueOutput {
-        current: stoppable(Box::new(Empty::<S>::new()) as Box<_>),
-        signal_after_end: None,
-        input: input.clone(),
-    };
-
-    (input, output)
+#[derive(Debug)]
+enum MusicPlayerCommand {
+    Play,
+    Pause,
+    Stop,
+    NextTrack,
 }
 
-// TODO: consider reimplementing this with `from_factory`
-
-/// The input of the queue.
-pub struct SourcesQueueInput<S> {
-    next_sounds: Mutex<
-        Vec<(
-            Stoppable<Box<dyn Source<Item = S> + Send>>,
-            Option<Sender<()>>,
-        )>,
-    >,
-
-    // See constructor.
-    keep_alive_if_empty: AtomicBool,
-
-    skip_sound: AtomicBool,
+pub struct SourcesQueueController<S> {
+    command_channel: std::sync::mpsc::Sender<MusicPlayerCommand>,
+    sound_channel: std::sync::mpsc::Sender<Box<dyn Source<Item = S> + Send>>,
 }
 
-impl<S> SourcesQueueInput<S>
+impl<S> SourcesQueueController<S>
 where
     S: Sample + Send + 'static,
 {
@@ -74,57 +29,64 @@ where
     where
         T: Source<Item = S> + Send + 'static,
     {
-        self.next_sounds
-            .lock()
-            .unwrap()
-            .push((stoppable(Box::new(source) as Box<_>), None));
+        let _ = self.sound_channel.send(Box::new(source) as Box<_>);
     }
 
-    /// Adds a new source to the end of the queue.
-    ///
-    /// The `Receiver` will be signalled when the sound has finished playing.
-    #[inline]
-    pub fn append_with_signal<T>(&self, source: T) -> Receiver<()>
-    where
-        T: Source<Item = S> + Send + 'static,
-    {
-        let (tx, rx) = mpsc::channel();
-        self.next_sounds
-            .lock()
-            .unwrap()
-            .push((stoppable(Box::new(source) as Box<_>), Some(tx)));
-        rx
+    pub fn pause(&self) {
+        let _ = self.command_channel.send(MusicPlayerCommand::Pause);
     }
 
-    /// Sets whether the queue stays alive if there's no more sound to play.
-    ///
-    /// See also the constructor.
-    pub fn set_keep_alive_if_empty(&self, keep_alive_if_empty: bool) {
-        self.keep_alive_if_empty
-            .store(keep_alive_if_empty, Ordering::Relaxed);
+    pub fn play(&self) {
+        let _ = self.command_channel.send(MusicPlayerCommand::Play);
     }
 
-    /// Sets whether the queue stays alive if there's no more sound to play.
-    ///
-    /// See also the constructor.
-    pub fn skip_sound(&self) {
-        self.skip_sound.store(true, Ordering::Release);
+    pub fn next(&self) {
+        let _ = self.command_channel.send(MusicPlayerCommand::NextTrack);
+    }
+
+    pub fn stop(&self) {
+        let _ = self.command_channel.send(MusicPlayerCommand::Stop);
     }
 }
 
-/// The output of the queue. Implements `Source`.
-pub struct SourcesQueueOutput<S> {
-    // The current iterator that produces samples.
-    current: Stoppable<Box<dyn Source<Item = S> + Send>>,
+pub fn queue2<S>(keep_alive_if_empty: bool) -> (SourcesQueueController<S>, SourcesQueue<S>)
+where
+    S: Sample + Send + 'static,
+{
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<MusicPlayerCommand>();
+    let (source_tx, source_rx) = std::sync::mpsc::channel::<Box<dyn Source<Item = S> + Send>>();
+    let output = SourcesQueue {
+        sound_queue: Vec::new(),
+        current: Box::new(Empty::<S>::new()) as Box<_>,
+        keep_alive_if_empty,
+        command_channel: cmd_rx,
+        sound_channel: source_rx,
+        paused: false,
+    };
+    let input = SourcesQueueController {
+        command_channel: cmd_tx,
+        sound_channel: source_tx,
+    };
 
-    // Signal this sender before picking from `next`.
-    signal_after_end: Option<Sender<()>>,
-
-    // The next sounds.
-    input: Arc<SourcesQueueInput<S>>,
+    (input, output)
 }
 
-impl<S> Source for SourcesQueueOutput<S>
+/// The input of the queue.
+pub struct SourcesQueue<S> {
+    sound_queue: Vec<Box<dyn Source<Item = S> + Send>>,
+
+    current: Box<dyn Source<Item = S> + Send>,
+
+    keep_alive_if_empty: bool,
+
+    command_channel: std::sync::mpsc::Receiver<MusicPlayerCommand>,
+
+    sound_channel: std::sync::mpsc::Receiver<Box<dyn Source<Item = S> + Send>>,
+
+    paused: bool,
+}
+
+impl<S> Source for SourcesQueue<S>
 where
     S: Sample + Send + 'static,
 {
@@ -176,7 +138,7 @@ where
     }
 }
 
-impl<S> Iterator for SourcesQueueOutput<S>
+impl<S> Iterator for SourcesQueue<S>
 where
     S: Sample + Send + 'static,
 {
@@ -185,12 +147,14 @@ where
     #[inline]
     fn next(&mut self) -> Option<S> {
         loop {
-            if self
-                .input
-                .skip_sound
-                .compare_and_swap(true, false, Ordering::Relaxed)
-            {
-                self.current.stop();
+            // Read command channel.
+            self.read_command_channel();
+
+            // Read input channel.
+            self.read_sound_channel();
+
+            if self.paused {
+                return Some(S::zero_value());
             }
 
             // Basic situation that will happen most of the time.
@@ -212,42 +176,65 @@ where
     }
 }
 
-impl<S> SourcesQueueOutput<S>
+impl<S> SourcesQueue<S>
 where
     S: Sample + Send + 'static,
 {
+    fn read_command_channel(&mut self) {
+        // Read one command per sample.
+        match self.command_channel.try_recv() {
+            Ok(command) => self.handle_command(command),
+            Err(_) => (),
+        }
+    }
+
+    fn handle_command(&mut self, command: MusicPlayerCommand) {
+        println!("Got command! {:?}", command);
+
+        match command {
+            MusicPlayerCommand::Play => {
+                self.paused = false;
+            }
+            MusicPlayerCommand::Pause => {
+                self.paused = true;
+            }
+            MusicPlayerCommand::NextTrack => {
+                let _ = self.go_next();
+            }
+            MusicPlayerCommand::Stop => {
+                self.sound_queue.clear();
+                let _ = self.go_next();
+            }
+        };
+    }
+
+    fn read_sound_channel(&mut self) {
+        match self.sound_channel.try_recv() {
+            Ok(source) => self.sound_queue.push(source),
+            Err(_) => (),
+        }
+    }
+
     // Called when `current` is empty and we must jump to the next element.
     // Returns `Ok` if the sound should continue playing, or an error if it should stop.
     //
     // This method is separate so that it is not inlined.
     fn go_next(&mut self) -> Result<(), ()> {
-        if let Some(signal_after_end) = self.signal_after_end.take() {
-            let _ = signal_after_end.send(());
-        }
-
-        let (next, signal_after_end) = {
-            let mut next = self.input.next_sounds.lock().unwrap();
-
-            if next.len() == 0 {
-                if self.input.keep_alive_if_empty.load(Ordering::Acquire) {
+        let next = {
+            if self.sound_queue.len() == 0 {
+                if self.keep_alive_if_empty {
                     // Play a short silence in order to avoid spinlocking.
                     let silence = Zero::<S>::new(1, 44100); // TODO: meh
-                    (
-                        stoppable(
-                            Box::new(silence.take_duration(Duration::from_millis(10))) as Box<_>
-                        ),
-                        None,
-                    )
+                    Box::new(silence.take_duration(Duration::from_millis(10))) as Box<_>
                 } else {
                     return Err(());
                 }
             } else {
-                next.remove(0)
+                self.sound_queue.remove(0)
             }
         };
 
         self.current = next;
-        self.signal_after_end = signal_after_end;
         Ok(())
     }
 }
@@ -255,13 +242,13 @@ where
 #[cfg(test)]
 mod tests {
     use buffer::SamplesBuffer;
-    use queue;
+    use queue2;
     use source::Source;
 
     #[test]
     #[ignore] // FIXME: samples rate and channel not updated immediately after transition
     fn basic() {
-        let (tx, mut rx) = queue::queue(false);
+        let (tx, mut rx) = queue2::queue2(false);
 
         tx.append(SamplesBuffer::new(1, 48000, vec![10i16, -10, 10, -10]));
         tx.append(SamplesBuffer::new(2, 96000, vec![5i16, 5, 5, 5]));
@@ -283,13 +270,13 @@ mod tests {
 
     #[test]
     fn immediate_end() {
-        let (_, mut rx) = queue::queue::<i16>(false);
+        let (_, mut rx) = queue2::queue2::<i16>(false);
         assert_eq!(rx.next(), None);
     }
 
     #[test]
     fn keep_alive() {
-        let (tx, mut rx) = queue::queue(true);
+        let (tx, mut rx) = queue2::queue2(true);
         tx.append(SamplesBuffer::new(1, 48000, vec![10i16, -10, 10, -10]));
 
         assert_eq!(rx.next(), Some(10));
@@ -305,7 +292,7 @@ mod tests {
     #[test]
     #[ignore] // TODO: not yet implemented
     fn no_delay_when_added() {
-        let (tx, mut rx) = queue::queue(true);
+        let (tx, mut rx) = queue2::queue2(true);
 
         for _ in 0..500 {
             assert_eq!(rx.next(), Some(0));

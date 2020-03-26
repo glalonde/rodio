@@ -96,7 +96,7 @@ extern crate lewton;
 extern crate minimp3;
 
 pub use cpal::{
-    traits::DeviceTrait, Device, Devices, DevicesError, Format, InputDevices, OutputDevices
+    traits::DeviceTrait, Device, Devices, DevicesError, Format, InputDevices, OutputDevices,
 };
 
 pub use conversions::Sample;
@@ -118,6 +118,7 @@ pub mod buffer;
 pub mod decoder;
 pub mod dynamic_mixer;
 pub mod queue;
+pub mod queue2;
 pub mod source;
 pub mod static_buffer;
 

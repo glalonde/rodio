@@ -23,6 +23,7 @@ pub use self::samples_converter::SamplesConverter;
 pub use self::sine::SineWave;
 pub use self::spatial::Spatial;
 pub use self::speed::Speed;
+pub use self::stoppable::stoppable;
 pub use self::stoppable::Stoppable;
 pub use self::take::TakeDuration;
 pub use self::uniform::UniformSourceIterator;

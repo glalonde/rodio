@@ -139,6 +139,12 @@ impl Sink {
         self.controls.stopped.store(true, Ordering::SeqCst);
     }
 
+    /// Stops the sink by emptying the queue.
+    #[inline]
+    pub fn skip(&self) {
+        self.queue_tx.skip_sound();
+    }
+
     /// Destroys the sink without stopping the sounds that are still playing.
     #[inline]
     pub fn detach(mut self) {
@@ -177,12 +183,11 @@ impl Drop for Sink {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use buffer::SamplesBuffer;
-    use source::Source;
     use sink::Sink;
+    use source::Source;
 
     #[test]
     fn test_pause_and_stop() {
@@ -230,6 +235,28 @@ mod tests {
 
         for _ in 0..v.len() {
             assert_eq!(queue_rx.next(), src.next());
+        }
+    }
+
+    #[test]
+    fn test_skip() {
+        let (sink, mut queue_rx) = Sink::new_idle();
+
+        let v1 = vec![10i16, -10, 10, -10, 10, -10];
+        let v2 = vec![20i16, -20, 20, -20, 20, -20];
+
+        sink.append(SamplesBuffer::new(2, 44100, v1.clone()));
+        sink.append(SamplesBuffer::new(2, 44100, v2.clone()));
+
+        let mut src1 = SamplesBuffer::new(2, 44100, v1.clone()).convert_samples();
+        let mut src2 = SamplesBuffer::new(2, 44100, v2.clone()).convert_samples();
+
+        for _ in 0..(v1.len() / 2) {
+            assert_eq!(queue_rx.next(), src1.next());
+        }
+        sink.skip();
+        for _ in 0..(v2.len()) {
+            assert_eq!(queue_rx.next(), src2.next());
         }
     }
 }
